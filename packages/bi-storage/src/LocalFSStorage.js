@@ -65,7 +65,6 @@ export default class LocalFSDriver {
       'removeItem',
       'setItem'
     ].forEach(fn=>this[fn]=this[fn].bind(this));
-    log.info("Creating LocalFSDriver");
   }
 
   _initStorage(options) {

@@ -1,7 +1,67 @@
+import {Handler} from 'bi-block-router';
+import * as DBNames from '../DBNames';
+
 /**
  * Aggregations failed txn counts
  */
 const FAIL_CNT = "_failures";
+
+export default class Failures extends Handler {
+    constructor() {
+        super("FailureAggregations");
+        this.failures = { total: 0 };
+        [
+            'init',
+            'newBlock',
+            'purgeBlocks'
+        ].forEach(fn=>this[fn]=this[fn].bind(this));
+    }
+
+    async init(ctx, next) {
+        let f = await ctx.db.read({
+            database: DBNames.Analytics, 
+            key: FAIL_CNT
+        });
+        if(f) {
+            this.failures = f;
+        }
+        return next();
+    }
+
+    async newBlock(ctx, block, next) {
+        let cnt = countFailures(block);
+        let ex ={
+            ...this.failures
+        }
+        ex.total += cnt;
+        this.failures = ex;
+        ctx.aggregations.put(FAIL_CNT, ex);
+        return next();
+    }
+
+    async purgeBlocks(ctx, blocks, next) {
+        let ex = {
+            ...this.failures
+        }
+
+        blocks.forEach(b=>{
+            let cnt = countFailures(b);
+            ex.total -= cnt;
+        })
+        if(ex.total < 0) {
+            //have to start over
+            let all = ctx.blocks || [];
+            ex.total = 0;
+            all.forEach(b=>{
+                ex.total += countFailures(b);
+            })
+        }
+        this.failures = ex;
+        ctx.aggregations.put(FAIL_CNT, ex);
+        return next();
+    }
+}
+
 const countFailures = block => {
     let cnt = block.transactions.reduce((c, t)=>{
         let r = t.receipt;
@@ -14,22 +74,4 @@ const countFailures = block => {
         return c;
     },0);
     return cnt;
-}
-
-export default async function(ctx, block) {
-    let cnt = countFailures(block);
-    let ex = await ctx.aggregations.get(FAIL_CNT);
-    if(!ex) {
-        ex = {total: 0}
-    }
-    ctx.aggregations.put(FAIL_CNT, {total: ex.total + cnt});
-}
-
-export const remove = async (ctx, block) => {
-    let ex = await ctx.aggregations.get(FAIL_CNT);
-    if(!ex) {
-        return;
-    }
-    let cnt = countFailures(block);
-    ctx.aggregations.put(FAIL_CNT, {total: ex.total - cnt});
 }

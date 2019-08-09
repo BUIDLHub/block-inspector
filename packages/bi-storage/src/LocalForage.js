@@ -17,16 +17,9 @@ import LocalFS from './LocalFSStorage';
 extendPrototype(localforage);
 const log = new Logger({component: "LocalForage"});
 const dbNames = {};
-let inst = null;
 
 export default class _LocalForage extends BaseDB {
-  static get instance() {
-    if(!inst) {
-      throw new Error("Did not initialize shared storage instance");
-    }
-    return inst;
-  }
-
+  
   constructor(props) {
     super(props);
     
@@ -45,7 +38,6 @@ export default class _LocalForage extends BaseDB {
       this[fn]=this[fn].bind(this)
     });
     this.querySizeLimit = props.querySizeLimit || 50;
-    inst = this;
   }
 
   async clearAll(dbs) {
@@ -87,6 +79,7 @@ export default class _LocalForage extends BaseDB {
   async createBulk(props) {
     createBulkSchema.validateSync(props);
     let db = await this._getDB(props, dbFactory);
+    log.debug("Creating bulk items", props.items, "in DB", db.name);
     try {
       await db.setItems(props.items);
     } catch (e) {
@@ -97,7 +90,9 @@ export default class _LocalForage extends BaseDB {
   async read(props) {
     readSchema.validateSync(props);
     let db = await this._getDB(props, dbFactory);
+    log.debug("Reading entry with key", props.key, "from DB with name", db.name);
     let r = await db.getItem(props.key);
+    log.debug("Results for key", props.key, r)
     return r;
   }
 
@@ -213,7 +208,7 @@ export default class _LocalForage extends BaseDB {
   async updateBulk(props) {
     createBulkSchema.validateSync(props);
     let db = await this._getDB(props, dbFactory);
-    log.debug("Storing", props.items.length,"items to",props.database);
+    log.debug("Storing", props.items.length,"items to",db.name);
     try {
       await db.ready().then(async ()=>{
         await db.setItems(props.items, null, null, (e,res)=>{
@@ -230,6 +225,18 @@ export default class _LocalForage extends BaseDB {
 
   async remove(props) {
     removeSchema.validateSync(props);
+    let db = await this._getDB(props, dbFactory);
+    try {
+      await db.ready().then(async ()=>{
+        await db.removeItem(props.key, (e, res)=>{
+          if(e) {
+            log.error("Problem removing item from DB", e);
+          }
+        })
+      });
+    } catch (e) {
+      log.error("Problem removing item", prop.database, e);
+    }
   }
 }
 
@@ -307,5 +314,6 @@ const dbFactory = async props => {
   }
   log.info("Creating DB", props.name);
   var db = await localforage.createInstance(lfProps);
+  db.name = lfProps.name;
   return db;
 }

@@ -4,9 +4,15 @@ import EventEmitter from 'events';
 import {Logger} from 'bi-utils';
 
 const schema = yup.object({
-    URL: yup.string().required("Missing connector URL setting"),
+    URL: yup.string(),
+    provider: yup.object(),
     id: yup.number().min(1).required("Missing connector id setting"),
     maxRetries: yup.number()
+})
+
+const replaySchema = yup.object({
+    fromBlock: yup.number().required("Missing fromBlock on replay block range"),
+    toBlock: yup.number()
 })
 
 const log = new Logger({component: "bi-Connector"});
@@ -17,38 +23,70 @@ export default class Connector extends EventEmitter {
         log.debug("Connector config", props);
         schema.validateSync(props);
         this.URL = props.URL;
+        this.provider = props.provider;
+        if(!this.provider && (!this.URL || this.URL.trim().length === 0)) {
+            throw new Error("Must have a web3 provider or an RPC endpoint URL to connect to");
+        }
         this.id = props.id;
         this.maxRetries = props.maxRetries || 50;
-        this.closed = false;
+        this.closed = true;
         [
             'currentBlock',
             'open',
             'close',
+            'pause',
             'startBlockSubscription',
             'transactions',
             'receipt'
         ].forEach(fn=>this[fn]=this[fn].bind(this))
     }
 
-    async currentBlock() {
+    async currentBlock(force) {
         if(this.closed) {
             throw new Error("Attemptng to get block after closed");
+        }
+        if(force) {
+            let n = await this.web3.eth.getBlockNumber();
+            let b = await this.web3.eth.getBlock(n, true);
+            this.lastBlock = b;
         }
         return this.lastBlock;
     }
 
+    async getBlock(num) {
+        if(this.closed) {
+            throw new Error("Attempting to get block with closed connector")
+        }
+        let b = await this.web3.eth.getBlock(num)
+        if(b && b.number > 0) {
+            b.networkId = this.networkId;
+        }
+        
+        return b;
+    }
+
     async open() {
-        log.info("Opening web3 connection to ", this.URL);
-       if(this.URL.startsWith("ws")) {
+        
+        if(this.provider) {
+            this.needsPolling = true;
+            this.web3 = new Web3(this.provider);
+        } else if(this.URL.startsWith("ws")) {
+            log.info("Opening web3 connection to ", this.URL);
            this.web3 = new Web3(new Web3.providers.WebsocketProvider(this.URL))
        } else {
+        log.info("Opening web3 connection to ", this.URL);
            this.needsPolling = true;
            this.web3 = new Web3(new Web3.providers.HttpProvider(this.URL))
        }
        try {
+        this.networkId = await this.web3.eth.net.getId();
+        if(!this.networkId) {
+            throw new Error("Could not get network id from web3");
+        }
         let n = await this.web3.eth.getBlockNumber();
         this.closed = false;
-        this.lastBlock = await this.web3.eth.getBlock(n-1, true);
+        this.lastBlock = await this.web3.eth.getBlock(n, true);
+        this.lastBlock.networkId = this.networkId;
         log.info("Current block number for network is", this.lastBlock.number);
        } catch (e) {
            log.error("Problem getting block number through connector", e);
@@ -63,8 +101,9 @@ export default class Connector extends EventEmitter {
         if(this.needsPolling) {
             await this.setupPoller();
         } else {
-            let subCallback = async (block) => {
+            this.subCallback = async (block) => {
                 if(block) {
+                    block.networkId = this.networkId;
                     log.debug("incoming block", block.number);
                     this.emit("block", block)
                 }
@@ -72,15 +111,8 @@ export default class Connector extends EventEmitter {
 
             log.info("Starting subscription for new blocks");
             this.sub = this.web3.eth.subscribe('newBlockHeaders');
-            this.sub.on("data", subCallback);
+            this.sub.on("data", this.subCallback);
         }
-    }
-
-    on(evt, listener) {
-        if(this.closed) {
-            throw new Error("Attemptng to subscribe after closed");
-        }
-        super.on(evt,listener)
     }
 
     async close() {
@@ -92,23 +124,38 @@ export default class Connector extends EventEmitter {
         }
     }
 
+    async pause() {
+        if(!this.needsPolling) {
+            await this.web3.eth.clearSubscriptions();
+            this.sub.removeListener("data", subCallback);
+        } else if(this.poller) {
+            await this.poller.stop();
+        }
+    }
+
     setupPoller() {
-        log.info("Will use polling for new blocks since using HTTP provider");
+        if(this.poller) {
+            return this.poller.start();
+        }
+        log.info("Will use polling for new blocks");
         this.poller = new Poller(this, this.maxRetries, this.lastBlock, (block,e)=>{
             if(e) {
                 log.error("Getting error in poll", e);
                 this.emit("error", e);
             } else if(block) {
-                log.info("Getting block from poller", block.number);
-                this.lastBlock = block;
-                this.emit("block", block);
+                if(block) {
+                    block.networkId = this.networkId;
+                    log.info("Getting block from poller", block.number, block.networkId);
+                    this.lastBlock = block;
+                    this.emit("block", block);
+                }
             }
         });
         return this.poller.start();
     }
 
     async transactions(block) {
-        if(block.transactions && block.transactions.length > 0) {
+        if(block.transactions && block.transactions.length > 0 && typeof block.transactions[0] !== 'string') {
             return block.transactions;
         }
         try {
@@ -118,6 +165,7 @@ export default class Connector extends EventEmitter {
                 keepGoing: true
             };
             let b = await execWithRetries(ctx, this.web3.eth.getBlock, block.number, true);
+
             b.transactions = b.transactions.map(t=>{
                 return _normalize(t);
             });
@@ -138,7 +186,15 @@ export default class Connector extends EventEmitter {
                 maxRetries: this.maxRetries,
                 keepGoing: true
             };
-            let r = await execWithRetries(ctx, this.web3.eth.getTransactionReceipt, txn.hash);
+            let r = null;
+            while(r === null) {
+                ctx.tries = 0;
+                r = await execWithRetries(ctx, this.web3.eth.getTransactionReceipt, txn.hash);
+                if(r === null) {
+                    await sleep(500);
+                }
+            }
+
             return r;
         } catch (e) {
             log.error("Problem getting receipt", e);
@@ -172,14 +228,19 @@ class Poller {
     }
 
     start() {
+        
         return new Promise(async (done,err)=>{
             log.info("Starting poller to poll for new blocks");
+            this.polling = true;
+            /*
             try {
-                log.debug("Sending first block to callback", this.lastBlock.number);
+                log.debug("Sending first block to callback", (this.lastBlock?this.lastBlock.number:"unknown"));
                 this.callback(this.lastBlock);
             } catch (e) {
                 return err(e);
             }
+            */
+
             let ctx = {
                 tries: 0,
                 maxRetries: this.maxRetries,
@@ -194,13 +255,15 @@ class Poller {
 
                 try {
                     let s = Date.now();
+                    ctx.tries = 0;
+                    ctx.keepGoing = this.polling;
                     await this._doPoll(ctx);
                     let next = 5000 - (Date.now()-s);
                     if(next < 0) {
                         next = 5000;
                     }
                     ctx.sleepTime = next;
-                    log.debug("Sleeping", ctx.sleepTime,"ms before next poll");
+                    log.info("Sleeping", ctx.sleepTime,"ms before next poll");
                     this.timeout = setTimeout(handler, ctx.sleepTime);
                 } catch (e) {
                     log.error("Could not pull blocks after max retries", e);
@@ -222,18 +285,25 @@ class Poller {
     stop() {
         this.polling = false;
         if(this.timeout) {
+            log.info("Stopping scheduled polling")
             clearTimeout(this.timeout);
             this.timeout = null;
         }
     }
 
     async _doPoll(ctx) {
-        let block = await execWithRetries(ctx, this.connector.web3.eth.getBlock, this.lastBlock.number+1, true);
-        if(block && block.number !== this.lastBlock.number) {
-            this.lastBlock = block;
-            this.callback(block);
-        } else {
-            log.debug("Block number is same as last block");
+        try {
+            let block = await execWithRetries(ctx, this.connector.web3.eth.getBlock, this.lastBlock.number+1, true);
+            let last = this.lastBlock;
+            if(block && block.number !== last.number) {
+                this.lastBlock = block;
+                log.info("Sending block since doesn't match new block", block.number, last.number);
+                this.callback(block);
+            } else {
+                log.debug("Block number is same as last block");
+            }
+        } catch (e) {
+            log.error("Problem polling for next block", e);
         }
     }
 }
@@ -247,6 +317,7 @@ const sleep = (ms) => {
 const execWithRetries = (ctx, fn, ...args) => {
     return new Promise(async (done, err)=>{
         log.debug("Interacting with web3 with retries", ctx);
+        let lastErr = null;
         while(ctx.tries < ctx.maxRetries) {
             ++ctx.tries;
             if(!ctx.keepGoing) {
@@ -258,14 +329,16 @@ const execWithRetries = (ctx, fn, ...args) => {
                 let res = await fn(...args);
                 return done(res);
             } catch (e) {
-                log.debug("Problem getting next block", e);
+                lastErr = e;
+                
                 if(ctx.tries > ctx.maxRetries) {
                    return err(e)
                 } else {
-                    log.debug("Pausing and will try again...")
+                    log.warn("Problem getting next block, will retry", e);
                     await sleep(1000);
                 }
             }
         }
+        err(new Error("Somehow did not execute. Last error was: " + (lastErr?lastErr.message:"unknown")));
     });
 }

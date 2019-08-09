@@ -1,10 +1,13 @@
 import * as yup from 'yup';
+import {Mutex} from 'async-mutex'
 
 /**
  * An in-memory implementation of storage. Mainly used for
  * testing
 */
 const dbBaseSchema = yup.string().required("Missing database parameter");
+
+const _dbMutex = new Mutex();
 
 export const createSchema = yup.object().shape({
   //database where to store the data
@@ -110,7 +113,7 @@ export default class BaseDB {
   }
 
   async init(props) {
-    console.log("Initializing with props", props);
+    //console.log("Initializing with props", props);
     let pfx = props.dbPrefix;
     if(pfx) {
       pfx += "_";
@@ -119,19 +122,25 @@ export default class BaseDB {
   }
 
   async _getDB(props, factory) {
-    if(!props.database) {
-      console.log("Incoming props", props);
-      throw new Error("No database name provided");
+    const release = await _dbMutex.acquire();
+    try {
+      if(!props.database) {
+        //console.log("Incoming props", props);
+        throw new Error("No database name provided");
+      }
+  
+      let name = this.dbPrefix + props.database;
+  
+      let db = this.dbs[name];
+  
+      if(!db) {
+        db = await factory({name});
+        this.dbs[name] = db;
+      }
+  
+      return db;
+    } finally {
+      release();
     }
-
-    let name = this.dbPrefix + props.database;
-
-    let db = this.dbs[name];
-
-    if(!db) {
-      db = await factory({name});
-      this.dbs[name] = db;
-    }
-    return db;
   }
 }

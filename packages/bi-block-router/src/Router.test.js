@@ -1,5 +1,77 @@
 import Web3 from 'bi-web3';
-import Router from './';
+import {Router, Handler} from './';
+
+
+class H1 extends Handler {
+    constructor(hitRes) {
+        super("H1");
+        this.hitRes = hitRes;
+
+        [
+            'init',
+            'newBlock',
+            'purgeBlocks'
+        ].forEach(fn=>this[fn]=this[fn].bind(this))
+    }
+
+    async init(ctx, next) {
+        return next();
+    }
+
+    async newBlock(ctx, block, next) {
+        this.hitRes.hit = true;
+        block._addedObject = {
+            content: "something"
+        }
+        ctx.passThrough = true
+        return next()
+    }
+
+    async purgeBlocks(ctx, blocks, next) {
+
+    }
+
+
+}
+
+class H2 extends Handler {
+    constructor(hitRes) {
+        super("H2");
+        this.hitRes = hitRes;
+        [
+            'init',
+            'newBlock',
+            'purgeBlocks'
+        ].forEach(fn=>this[fn]=this[fn].bind(this))
+    }
+
+    async init(ctx, next) {
+        return next();
+    }
+
+    async newBlock(ctx, block, next) {
+        this.hitRes.hit = true;
+        block._addedObject = {
+            content: "something"
+        }
+        ctx.passThrough = true
+        return next();
+    }
+
+    async purgeBlocks(ctx, blocks, next) {
+        if(!ctx.passThrough) {
+            this.hitRes.error = "Missing context pass through";
+        }
+        let obj = block._addedObject;
+        if(!obj) {
+            this.hitRes.error = "Missing object appended to block";
+        }
+        if(!obj.content) {
+            this.hitRes.error = "Missing object property added to block";
+        }
+        return next();
+    }
+}
 
 describe("Router", ()=>{
     it("should send block through registered handlers", done=>{
@@ -12,34 +84,13 @@ describe("Router", ()=>{
             error: null
         }
 
-        let  h1 = async (ctx, block, next) => {
-            h1Res.hit = true;
-            ctx.passThrough = true;
-            block._addedObject = {
-                content: "something"
-            }
-            return next();
-        }
-
-        let h2 = async (ctx, block, next) => {
-            h2Res.hit = true;
-            if(!ctx.passThrough) {
-                h2Res.error = "Missing context pass through";
-            }
-            let obj = block._addedObject;
-            if(!obj) {
-                h2Res.error = "Missing object appended to block";
-            }
-            if(!obj.content) {
-                h2Res.error = "Missing object property added to block";
-            }
-            return next();
-        }
+        let h1 = new H1(h1Res);
+        let h2 = new H2(h2Res);
         let web3 = new Web3();
         let router = new Router({web3, config: web3.config})
         router.use(h1);
         router.use(h2);
-        web3.start().then(async ()=>{
+        router.init().then(web3.start).then(async ()=>{
             await sleep(1000);
             await web3.stop();
             if(!h1Res.hit) {

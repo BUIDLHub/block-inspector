@@ -1,9 +1,12 @@
 import Web3 from 'bi-web3';
-import appendTxns from './appendTransactions';
+import Handler from './appendTransactions';
+import Config from 'bi-config';
 
 describe("AppendTransactions", ()=>{
     it("should append block transactions if not present", done=>{
-        let web3 = new Web3();
+        let cfg = Config.create();
+        
+        let web3 = new Web3(cfg);
         let conn = web3.connector;
         conn.open().then(async ()=>{
             let b = await conn.currentBlock();
@@ -17,7 +20,8 @@ describe("AppendTransactions", ()=>{
                 }
                 done();
             }
-            appendTxns(ctx, b, next);
+            let h = new Handler();
+            h.newBlock(ctx, b, next);
         })
     });
 });

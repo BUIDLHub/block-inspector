@@ -1,15 +1,21 @@
-import gasTracker,{remove as gasRemove} from './gasTracker';
-import txnCount,{remove as txnRemove} from './txnCount';
-import failures, {remove as failRemove} from './failures';
-import blockStats,{remove as blockStatsRemove} from './blockStats';
+import GasTracker from './gasTracker';
+import TxnCount from './txnCount';
+import Failures from './failures';
+import BlockStats from './blockStats';
 import _ from 'lodash';
 import * as DBNames from '../DBNames';
 import {Logger} from 'bi-utils';
+import {Handler} from 'bi-block-router'
 
 /**
  * Runs blocks through a series of aggregation functions that track counts, etc. Then when all are done, 
  * aggregation data is stored in Analytics DB.
  */
+
+ const blockStats = new BlockStats();
+ const txnCount = new TxnCount();
+ const failures = new Failures();
+ const gasTracker = new GasTracker();
 
  const analytics = [
      gasTracker,
@@ -18,50 +24,35 @@ import {Logger} from 'bi-utils';
      blockStats
  ];
 
- const removals = [
-     blockStatsRemove,
-     failRemove,
-     gasRemove,
-     txnRemove
- ]
-
  const log = new Logger({component: "AnalyticsHandler"});
 
- export default class Analytics {
+ export default class Analytics extends Handler {
      constructor() {
-         this.aggFields = [];
-         this.cache = {};
+         super("AnalyticsHandler");
          [
              'init',
-             'exec',
-             'removeFromDB',
+             'newBlock',
+             'purgeBlocks',
              'readFromDB'
          ].forEach(fn=>this[fn]=this[fn].bind(this));
      }
 
-     async init() {
-         this.cache = {};
+     async init(ctx, next) {
+         for(let i=0;i<analytics.length;++i) {
+             let a = analytics[i];
+             await a.init(ctx, ()=>{});
+         }
+         return next();
      }
 
-    async exec(ctx, block, next) {
-       
+    async newBlock(ctx, block, next) {
+        let dbCache = {};
         let aCtx = {
             ...ctx,
             aggregations: {
-                get: async (key) => {
-                    let v = this.cache[key];
-                    if(!v) {
-                        v = await ctx.db.read({
-                                database: DBNames.Analytics,
-                                key: key
-                            });
-                        this.cache[key] = v;
-                    }
-                    return v;
-                },
                 put: (key, val) => {
                     log.debug("Adding aggregation with key", key, val);
-                    this.cache[key] = val;
+                    dbCache[key] = val;
                 }
             }
         }
@@ -69,15 +60,15 @@ import {Logger} from 'bi-utils';
         log.debug("Running through", analytics.length,"aggregators");
         let calls = [];
         analytics.forEach(a=>{
-            calls.push(a(aCtx,block));
+            calls.push(a.newBlock(aCtx,block, ()=>{}));
         });
         
         await Promise.all(calls);
-        this.aggNames = _.keys(this.cache);
-        log.debug("Aggregation keys", this.aggNames);
-        let updates = this.aggNames.map(a=>({
+        let aggNames = _.keys(dbCache);
+        log.debug("Aggregation keys", aggNames);
+        let updates = aggNames.map(a=>({
             key: a,
-            value: this.cache[a]
+            value: dbCache[a]
         }));
         log.debug("Analytics generated", updates.length, "aggregations", updates);
         await ctx.db.updateBulk({
@@ -89,72 +80,44 @@ import {Logger} from 'bi-utils';
         return next();
     }
 
-    async removeFromDB(ctx, block) {
-        log.debug("Removing block", block.number,"analytics");
+    async purgeBlocks(ctx, blocks, next) {
+        let dbCache = {};
         let aCtx = {
             ...ctx,
             aggregations: {
-                get: async (key) => {
-                    let v = this.cache[key];
-                    if(!v) {
-                        v = await ctx.db.read({
-                                database: DBNames.Analytics,
-                                key: key
-                            });
-                        this.cache[key] = v;
-                    }
-                    return v;
-                },
                 put: (key, val) => {
                     log.debug("Adding aggregation with key", key, val);
-                    this.cache[key] = val;
+                    dbCache[key] = val;
                 }
             }
         }
-
-        log.debug("Removing from", removals.length,"aggregators");
-        let calls = [];
-        removals.forEach(r=>{
-            calls.push(r(aCtx,block));
-        });
-        
-        await Promise.all(calls);
-        this.aggNames = _.keys(this.cache);
-        let updates = this.aggNames.map(a=>{
-            let v = this.cache[a];
-            if(v) {
-                return {
-                    key: a,
-                    value: v
-                }
-            }
-            return null;
-        }).filter(a=>a!==null);
-
-        log.debug("Saving", updates.length, "aggregations after removing block", block.number);
+        log.debug("Purging", blocks.length,"blocks from analytics repo across", analytics.length,"analytic handlers");
+        for(let i=0;i<analytics.length;++i) {
+            let a = analytics[i];
+            await a.purgeBlocks(aCtx, blocks, ()=>{});
+        }
+        log.debug("Resulting analytic repo", dbCache);
+        let aggNames = _.keys(dbCache);
+        let updates = aggNames.map(a=>({
+            key: a,
+            value: dbCache[a]
+        }));
         await ctx.db.updateBulk({
             database: DBNames.Analytics,
             items: updates
         });
 
-        log.debug("Finished storing all aggregations");
-
+        return next();
     }
 
     async readFromDB(db) {
-        let calls = [];
-        log.debug("Reading analytic fields", this.aggNames);
-        this.aggNames.forEach(a=>{
-            calls.push(db.read({
-                database: DBNames.Analytics,
-                key: a
-            }))
+        let vals = {};
+        await db.iterate({
+            database: DBNames.Analytics,
+            callback: (v, k) => {
+                vals[k] = v;
+            }
         });
-        let results = await Promise.all(calls);
-        log.debug("Analytics read Results", results);
-        return this.aggNames.reduce((obj,a,i)=>{
-            obj[a] = results[i];
-            return obj;
-        },{});
+        return vals;
     }
  }

@@ -16,13 +16,24 @@ export default class BiWeb3 {
         [
             'start',
             'stop',
-            'currentBlock'
+            'open',
+            'pause',
+            'networkId',
+            'currentBlock',
+            'getBlock',
+            'getBlockRange'
         ].forEach(fn=>this[fn]=this[fn].bind(this))
+    }
+
+    async open() {
+        return this.connector.open()
     }
 
     async start() {
         okOrThrow(this.connector,"Attempting to start a closed web3 instance");
-        await this.connector.open();
+        if(this.connector.closed) {
+            await this.connector.open()
+        }
         return this.connector.startBlockSubscription();
     }
 
@@ -31,9 +42,33 @@ export default class BiWeb3 {
        this.connector = null;
     }
 
-    async currentBlock() {
+    async pause() {
+        await this.connector.pause();
+    }
+
+    async currentBlock(force) {
         okOrThrow(this.connector, "Attempting to get block from closed web3");
-        return this.connector.currentBlock();
+        return this.connector.currentBlock(force);
+    }
+
+    async getBlock(num) {
+        let blocks = getBlockRange({
+            fromBlock: num,
+            toBlock: num
+        })
+    }
+
+    async getBlockRange(range, cb) {
+        let s = range.fromBlock;
+        let e = range.toBlock || s;
+        let calls = [];
+        for(let i=s;i<=e;++i) {
+            log.debug("Requesting block", i, "from on-chain...");
+            calls.push(this.connector.getBlock(i, true).then(cb))
+        }
+        log.debug("Waiting for block request calls to complete...")
+        await Promise.all(calls);
+        log.debug("All requests completed");
     }
 
     async transactions(block) {
@@ -46,6 +81,11 @@ export default class BiWeb3 {
         okOrThrow(this.connector, "Attempting to get receipt from closed web3");
         log.debug("Getting receipts for txn", txn.hash);
         return this.connector.receipt(txn);
+    }
+
+    async networkId() {
+        okOrThrow(this.connector, "Attempting to get network id from closed web3");
+        return this.connector.networkId;
     }
 }
 

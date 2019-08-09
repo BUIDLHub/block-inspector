@@ -13,7 +13,8 @@
   "scripts": {
     "test": "mocha --require babel-core/register --require babel-polyfill $(find ./src -name *.test.js)",
     "prepare": "babel ./src --out-dir ./dist --ignore '**/*.test.js'",
-    "build": "npm run prepare"
+    "build": "npm run prepare",
+    "lerna-build": "lerna bootstrap --scope=bi-middleware"
   },
   "bugs": {
     "url": "https://github.com/buidlhub/block-inspector/issues"
@@ -33,6 +34,7 @@
     "mocha": "^6.2.0"
   },
   "dependencies": {
+    "async-mutex": "^0.1.3",
     "bi-block-router": "^0.1.0",
     "bi-config": "^0.1.0",
     "bi-storage": "^0.1.0",

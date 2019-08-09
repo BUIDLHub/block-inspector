@@ -5,8 +5,9 @@ import Config from 'bi-config';
 describe("Connector", ()=>{
     it("should connect and get current block", done=>{
         let cfg = Config.create();
-        console.log("TEST CONFIG", cfg);
+        
         let con = new Connector(cfg.network)
+        
         con.open().then(async ()=>{
             try {
                 let b = await con.currentBlock();
@@ -18,6 +19,7 @@ describe("Connector", ()=>{
         });
     });
 
+    
     it("should get block from subscription", done=>{
         let con = new Connector(Config.create().network);
         con.open().then(()=>{
@@ -63,5 +65,6 @@ describe("Connector", ()=>{
             }
         })
     });
+    
 });
 

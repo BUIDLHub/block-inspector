@@ -1,5 +1,5 @@
 import Web3 from 'bi-web3';
-import appendRecs from './appendReceipts';
+import Handler from './appendReceipts';
 
 describe("AppendReceipts", ()=>{
     it("should append block transactions if not present", done=>{
@@ -21,7 +21,8 @@ describe("AppendReceipts", ()=>{
                 }
                 done();
             }
-            appendRecs(ctx, b, next);
+            let h = new Handler();
+            h.newBlock(ctx, b, next);
         })
     });
 });
